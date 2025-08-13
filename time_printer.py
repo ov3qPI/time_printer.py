@@ -1,73 +1,79 @@
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 from skyfield.api import load
 from skyfield.almanac import find_discrete, seasons
 
-def get_decimal_time(solar_midnight, current_time=None):
-    if current_time is None:
-        current_time = datetime.now()
-    
-    seconds_in_day = 24 * 60 * 60
-    elapsed_seconds = (current_time - solar_midnight).total_seconds()
-    
+DEFAULT_LONGITUDE = -107.877741
+SECONDS_IN_DAY = 24 * 60 * 60
+
+def longitudinal_now(longitude: float, now_utc: Optional[datetime] = None) -> datetime:
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+    offset = timedelta(hours=longitude / 15.0)
+    return now_utc.astimezone(timezone(offset))
+
+def day_decimal_from_longitudinal_time(longitude: float, now_utc: Optional[datetime] = None, precision: int = 5) -> float:
+    lt = longitudinal_now(longitude, now_utc)
+    local_midnight = lt.replace(hour=0, minute=0, second=0, microsecond=0)
+    elapsed_seconds = (lt - local_midnight).total_seconds()
     if elapsed_seconds < 0:
-        elapsed_seconds += seconds_in_day
-    
-    return round(elapsed_seconds / seconds_in_day, 5)
+        elapsed_seconds += SECONDS_IN_DAY
+    frac = elapsed_seconds / SECONDS_IN_DAY
+    r = round(frac, precision)
+    return 0.0 if r >= 1.0 else r
 
-def calculate_days_since_solstice(current_time, observer_lat=38.478752, observer_lon=-107.877739):
+def _recent_december_solstice_tt(now_tt: float):
     eph = load('de440s.bsp')
     ts = load.timescale()
-    now = ts.utc(current_time.year, current_time.month, current_time.day)
-
-    t_start = ts.tt_jd(now.tt - 365)
-    t_end = ts.tt_jd(now.tt + 365)
-    
+    t_start = ts.tt_jd(now_tt - 365)
+    t_end = ts.tt_jd(now_tt + 365)
     times, events = find_discrete(t_start, t_end, seasons(eph))
-    recent_solstice = max([t for t, e in zip(times, events) if e == 3 and t.tt <= now.tt])
-    
-    return int(now.tt - recent_solstice.tt)
+    return max([t.tt for t, e in zip(times, events) if e == 3 and t.tt <= now_tt])
 
-def get_year_fraction(observer_lat=38.478752, observer_lon=-107.877739):
+def days_since_solstice_local(longitude: float, now_utc: Optional[datetime] = None) -> int:
+    lt = longitudinal_now(longitude, now_utc)
+    local_midnight = lt.replace(hour=0, minute=0, second=0, microsecond=0)
+    utc_at_local_midnight = local_midnight.astimezone(timezone.utc)
+    ts = load.timescale()
+    now = ts.utc(utc_at_local_midnight.year, utc_at_local_midnight.month, utc_at_local_midnight.day,
+                 utc_at_local_midnight.hour, utc_at_local_midnight.minute, utc_at_local_midnight.second)
+    sol_tt = _recent_december_solstice_tt(now.tt)
+    return int(now.tt - sol_tt)
+
+def get_year_fraction() -> float:
     eph = load('de440s.bsp')
     ts = load.timescale()
-
     now = ts.now()
     t_start = ts.tt_jd(now.tt - 365)
     t_end = ts.tt_jd(now.tt + 365)
-
     times, events = find_discrete(t_start, t_end, seasons(eph))
-    december_solstices = [t for t, e in zip(times, events) if e == 3]
+    decs = [t for t, e in zip(times, events) if e == 3]
+    recent = max([t for t in decs if t.tt < now.tt])
+    nxt = min([t for t in decs if t.tt > now.tt])
+    return (now.tt - recent.tt) / (nxt.tt - recent.tt)
 
-    recent_solstice = max([t for t in december_solstices if t.tt < now.tt])
-    next_solstice = min([t for t in december_solstices if t.tt > now.tt])
+def day_of_year_decimal(longitude: float, now_utc: Optional[datetime] = None, precision: int = 5) -> float:
+    frac = day_decimal_from_longitudinal_time(longitude, now_utc, precision + 2)
+    whole = days_since_solstice_local(longitude, now_utc)
+    v = whole + frac
+    return float(f"{v:.{precision}f}")
 
-    year_duration = next_solstice.tt - recent_solstice.tt
-    elapsed_time = now.tt - recent_solstice.tt
-
-    return elapsed_time / year_duration
-
-def live_decimal_time(solar_midnight):
+def live_decimal_time(longitude: float = DEFAULT_LONGITUDE, precision: int = 5) -> None:
     try:
         print("Press Ctrl+C to stop.")
-        print("\n" * 6)
-        
+        print("\n" * 5)
         while True:
-            current_time = datetime.now()
-            decimal_time = get_decimal_time(solar_midnight, current_time)
-            days_since_solstice = calculate_days_since_solstice(current_time)
-            year_fraction = get_year_fraction()
-
-            print("\033[F\033[K" * 4, end="")
-            print(f"Day Decimal: {decimal_time}")
-            print(f"Day-of-Year: {days_since_solstice}")
-            print(f"Year Decimal: {year_fraction:.7f}")
+            now_utc = datetime.now(timezone.utc)
+            doy_dec = day_of_year_decimal(longitude, now_utc, precision)
+            year_frac = get_year_fraction()
+            print("\033[F\033[K" * 3, end="")
+            print(f"Day-of-Year.Dec: {doy_dec:.{precision}f}")
+            print(f"Year Decimal: {year_frac:.7f}")
             print("Year is tropical")
-
             time.sleep(1)
     except KeyboardInterrupt:
         print("\nStopped.")
 
 if __name__ == "__main__":
-    solar_midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    live_decimal_time(solar_midnight)
+    live_decimal_time()
